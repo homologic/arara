@@ -27,7 +27,7 @@ struct Args {
     interval: f64,
 
     /// Duration (in seconds) after which data is considered stale.
-    #[arg(long, short, default_value = "10")]
+    #[arg(long, short, default_value = "60")]
     stale: f64,
 }
 
