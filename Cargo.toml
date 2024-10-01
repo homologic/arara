@@ -7,7 +7,7 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.80"
-btleplug = "0.11.5"
+bluez-async = "0.7.2"
 chrono = "0.4.34"
 clap = { version = "4.5.0", features = ["derive"] }
 hex = "0.4.3"
