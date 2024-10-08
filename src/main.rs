@@ -142,56 +142,42 @@ fn print_state(args: &Args, state: &State) -> Result<()> {
             writeln!(&mut stdout)?;
         }
         OutputFormat::Waybar => {
-            let format_aranet4 = |ann: &aranet4::Announcement| {
-                format!(
-                    "🪟 {} 🌡️ {:.2} ☔ {} 🗜️ {:.0}",
-                    ann.co2.map(i32::from).unwrap_or(-1),
-                    ann.temperature.unwrap_or(-1.0),
-                    ann.humidity,
-                    ann.pressure.unwrap_or(-1.0),
-                )
-            };
-
-            // For the status bar text, use the highest CO2, temp, pressure and humidity observed.
-            let text = format_aranet4(&aranet4::Announcement {
-                co2: output
-                    .aranet4
-                    .values()
-                    .map(|a| a.co2.unwrap_or_default())
-                    .reduce(u16::max),
-                temperature: output
-                    .aranet4
-                    .values()
-                    .map(|a| a.temperature.unwrap_or_default())
-                    .reduce(f64::max),
-                pressure: output
-                    .aranet4
-                    .values()
-                    .map(|a| a.pressure.unwrap_or_default())
-                    .reduce(f64::max),
-                humidity: output
-                    .aranet4
-                    .values()
-                    .map(|a| a.humidity)
-                    .reduce(u8::max)
-                    .unwrap_or_default(),
-                battery: 0,
-                status: 0,
-            });
-            // For the tooltip, simply list all the sensors in the vicinity.
-            let tooltip = output
+            // Format and sort the readings by CO2 value.
+            let mut aranet4: Vec<(&String, u16, String)> = output
                 .aranet4
                 .iter()
-                .map(|(id, ann)| format!("[{}] {}", id, format_aranet4(ann)))
-                .join("\n");
+                .map(|(id, ann)| {
+                    let s = format!(
+                        "🪟 {} 🌡️ {:.2} ☔ {} 🗜️ {:.0}",
+                        ann.co2.map(i32::from).unwrap_or(-1),
+                        ann.temperature.unwrap_or(-1.0),
+                        ann.humidity,
+                        ann.pressure.unwrap_or(-1.0),
+                    );
+                    (id, ann.co2.unwrap_or_default(), s)
+                })
+                .collect();
+            aranet4.sort_by_key(|(_, co2, _)| *co2);
 
             // Each line is one reading.
             #[derive(Serialize)]
-            struct WaybarOutput {
-                pub text: String,
+            struct WaybarOutput<'a> {
+                pub text: &'a str,
                 pub tooltip: String,
             }
-            serde_json::to_writer(&mut stdout, &WaybarOutput { text, tooltip })?;
+            serde_json::to_writer(
+                &mut stdout,
+                &WaybarOutput {
+                    text: aranet4
+                        .first()
+                        .map(|(_, _, s)| s.as_str())
+                        .unwrap_or_default(),
+                    tooltip: aranet4
+                        .iter()
+                        .map(|(id, _, s)| format!("[{}] {}", id, s))
+                        .join("\n"),
+                },
+            )?;
             writeln!(&mut stdout)?;
         }
     }
