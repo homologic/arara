@@ -1,15 +1,22 @@
 mod aranet4;
 
-use anyhow::{bail, Error, Result};
+use anyhow::{anyhow, Error, Result};
 use bluez_async::{AdapterEvent, BluetoothEvent, BluetoothSession, DeviceEvent, DeviceId};
 use chrono::{DateTime, Duration, Utc};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
+use itertools::Itertools;
 use scroll::Pread;
 use serde::Serialize;
-use std::{cmp::max, collections::HashMap, io::Write};
+use std::{collections::HashMap, io::Write};
 use tokio::select;
-use tokio_stream::{Stream, StreamExt};
+use tokio_stream::StreamExt;
 use tracing::{debug, error, instrument};
+
+#[derive(Debug, Copy, Clone, ValueEnum)]
+enum OutputFormat {
+    Json,
+    Waybar,
+}
 
 #[derive(Parser, Debug)]
 #[command(version)]
@@ -29,6 +36,10 @@ struct Args {
     /// Duration (in seconds) after which data is considered stale.
     #[arg(long, short, default_value = "60")]
     stale: f64,
+
+    /// Format to output in.
+    #[arg(long, short = 'F', default_value = "json")]
+    output_format: OutputFormat,
 }
 
 #[instrument(skip_all)]
@@ -56,15 +67,11 @@ async fn main() -> Result<()> {
     let (bt_join_handle, session) = BluetoothSession::new().await?;
 
     // Spawn a background task that processes Bluetooth events.
-    let events = session.event_stream().await?;
-    tokio::spawn(async move { run(&args, events).await });
+    tokio::spawn(async move { run(&args, session).await });
 
-    // Start discovery.
-    session.start_discovery().await?;
-
-    // Bail out and hopefully restart if the session goes away, for some reason.
+    // Bail out and hopefully restart if the session goes away for some reason.
     bt_join_handle.await?;
-    bail!("Bluetooth Session terminated!");
+    Err(anyhow!("Bluetooth Session terminated!"))
 }
 
 #[derive(Debug, Default)]
@@ -72,60 +79,14 @@ struct State {
     aranet4: HashMap<DeviceId, (DateTime<Utc>, aranet4::Announcement)>,
 }
 
-fn print_state(args: &Args, state: &State) -> Result<()> {
-    #[derive(Debug, Default, Serialize)]
-    struct OutputAranet4 {
-        pub co2: Option<u16>,
-        pub temperature: Option<f64>,
-        pub pressure: Option<f64>,
-        pub humidity: u8,
-    }
-    #[derive(Debug, Default, Serialize)]
-    struct Output {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        aranet4: Option<OutputAranet4>,
-    }
-
-    // Accumulate output data.
-    let now = Utc::now();
-    let stale = Duration::from_std(std::time::Duration::from_secs_f64(args.stale)).unwrap();
-    let output = Output {
-        aranet4: state
-            .aranet4
-            .iter()
-            .filter(|(_, (ts, _))| now - ts < stale)
-            .map(|(_, (_, ann))| ann)
-            .fold(None, |out_, ann| {
-                let mut out = out_.unwrap_or_default();
-                // Use the highest currently observable readings.
-                if let Some(co2) = ann.co2 {
-                    out.co2 = Some(max(out.co2.unwrap_or_default(), co2));
-                }
-                if let Some(temp) = ann.temperature {
-                    out.temperature = Some(f64::max(out.temperature.unwrap_or_default(), temp));
-                }
-                if let Some(press) = ann.pressure {
-                    out.pressure = Some(f64::max(out.pressure.unwrap_or_default(), press));
-                }
-                out.humidity = max(out.humidity, ann.humidity);
-                Some(out)
-            }),
-    };
-
-    // Write to stdout.
-    let mut stdout = std::io::stdout();
-    serde_json::to_writer(&mut stdout, &output)?;
-    write!(&mut stdout, "\n")?;
-    stdout.flush()?;
-
-    Ok(())
-}
-
 #[instrument(skip_all)]
-async fn run(args: &Args, mut events: impl Stream<Item = BluetoothEvent> + Unpin) {
+async fn run(args: &Args, session: BluetoothSession) {
     let mut state = State::default();
     let mut output_ticker =
         tokio::time::interval(std::time::Duration::from_secs_f64(args.interval));
+    let mut events = session.event_stream().await.unwrap();
+
+    session.start_discovery().await.unwrap();
     loop {
         enum Poll {
             OutputTick,
@@ -136,7 +97,7 @@ async fn run(args: &Args, mut events: impl Stream<Item = BluetoothEvent> + Unpin
             Some(event) = events.next() => Poll::Event(event),
         } {
             Poll::OutputTick => {
-                if let Err(err) = print_state(&args, &state) {
+                if let Err(err) = print_state(args, &state) {
                     error!(?err, "Couldn't print state");
                 }
             }
@@ -147,6 +108,96 @@ async fn run(args: &Args, mut events: impl Stream<Item = BluetoothEvent> + Unpin
             }
         }
     }
+}
+
+fn print_state(args: &Args, state: &State) -> Result<()> {
+    #[derive(Debug, Serialize)]
+    struct Output<'s> {
+        #[serde(skip_serializing_if = "HashMap::is_empty")]
+        pub aranet4: HashMap<String, &'s aranet4::Announcement>,
+    }
+
+    // Accumulate output data.
+    let now = Utc::now();
+    let stale = Duration::from_std(std::time::Duration::from_secs_f64(args.stale)).unwrap();
+    let output = Output {
+        aranet4: state
+            .aranet4
+            .iter()
+            .filter(|(_, (ts, _))| now - ts < stale)
+            .map(|(id, (_, ann))| (id.to_string(), ann))
+            .collect(),
+    };
+    // Don't log anything if there's no non-stale data.
+    if output.aranet4.is_empty() {
+        return Ok(());
+    }
+    debug!("{:?}", &output);
+
+    // Write to stdout.
+    let mut stdout = std::io::stdout();
+    match args.output_format {
+        OutputFormat::Json => {
+            serde_json::to_writer_pretty(&mut stdout, &output)?;
+            writeln!(&mut stdout)?;
+        }
+        OutputFormat::Waybar => {
+            let format_aranet4 = |ann: &aranet4::Announcement| {
+                format!(
+                    "🪟 {} 🌡️ {:.2} ☔ {} 🗜️ {:.0}",
+                    ann.co2.map(i32::from).unwrap_or(-1),
+                    ann.temperature.unwrap_or(-1.0),
+                    ann.humidity,
+                    ann.pressure.unwrap_or(-1.0),
+                )
+            };
+
+            // For the status bar text, use the highest CO2, temp, pressure and humidity observed.
+            let text = format_aranet4(&aranet4::Announcement {
+                co2: output
+                    .aranet4
+                    .values()
+                    .map(|a| a.co2.unwrap_or_default())
+                    .reduce(u16::max),
+                temperature: output
+                    .aranet4
+                    .values()
+                    .map(|a| a.temperature.unwrap_or_default())
+                    .reduce(f64::max),
+                pressure: output
+                    .aranet4
+                    .values()
+                    .map(|a| a.pressure.unwrap_or_default())
+                    .reduce(f64::max),
+                humidity: output
+                    .aranet4
+                    .values()
+                    .map(|a| a.humidity)
+                    .reduce(u8::max)
+                    .unwrap_or_default(),
+                battery: 0,
+                status: 0,
+            });
+            // For the tooltip, simply list all the sensors in the vicinity.
+            let tooltip = output
+                .aranet4
+                .iter()
+                .map(|(id, ann)| format!("[{}] {}", id, format_aranet4(ann)))
+                .join("\n");
+
+            // Each line is one reading.
+            #[derive(Serialize)]
+            struct WaybarOutput {
+                pub text: String,
+                pub tooltip: String,
+            }
+            serde_json::to_writer(&mut stdout, &WaybarOutput { text, tooltip })?;
+            writeln!(&mut stdout)?;
+        }
+    }
+    stdout.flush()?;
+
+    Ok(())
 }
 
 #[instrument(skip_all)]
