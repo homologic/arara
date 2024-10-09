@@ -169,7 +169,7 @@ fn print_state(args: &Args, state: &State) -> Result<()> {
                     (id, ann.co2.unwrap_or_default(), s)
                 })
                 .collect();
-            aranet4.sort_by_key(|(_, co2, _)| *co2);
+            aranet4.sort_by_key(|(_, co2, _)| -(*co2 as i32)); // hack to sort descending
 
             // Each line is one reading.
             #[derive(Serialize)]
