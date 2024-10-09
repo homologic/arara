@@ -1,7 +1,9 @@
 mod aranet4;
 
 use anyhow::{anyhow, Error, Result};
-use bluez_async::{AdapterEvent, BluetoothEvent, BluetoothSession, DeviceEvent, DeviceId};
+use bluez_async::{
+    AdapterEvent, BluetoothEvent, BluetoothSession, DeviceEvent, DeviceId, DeviceInfo,
+};
 use chrono::{DateTime, Duration, Utc};
 use clap::{Parser, ValueEnum};
 use itertools::Itertools;
@@ -10,7 +12,7 @@ use serde::Serialize;
 use std::{collections::HashMap, io::Write};
 use tokio::select;
 use tokio_stream::StreamExt;
-use tracing::{debug, error, instrument};
+use tracing::{debug, error, instrument, warn};
 
 #[derive(Debug, Copy, Clone, ValueEnum)]
 enum OutputFormat {
@@ -77,6 +79,7 @@ async fn main() -> Result<()> {
 #[derive(Debug, Default)]
 struct State {
     aranet4: HashMap<DeviceId, (DateTime<Utc>, aranet4::Announcement)>,
+    devices: HashMap<DeviceId, DeviceInfo>,
 }
 
 #[instrument(skip_all)]
@@ -102,7 +105,7 @@ async fn run(args: &Args, session: BluetoothSession) {
                 }
             }
             Poll::Event(event) => {
-                if let Err(err) = process_event(&mut state, &event).await {
+                if let Err(err) = process_event(&mut state, &session, &event).await {
                     error!(?event, ?err, "Event Error");
                 };
             }
@@ -125,7 +128,16 @@ fn print_state(args: &Args, state: &State) -> Result<()> {
             .aranet4
             .iter()
             .filter(|(_, (ts, _))| now - ts < stale)
-            .map(|(id, (_, ann))| (id.to_string(), ann))
+            .map(|(id, (_, ann))| {
+                (
+                    state
+                        .devices
+                        .get(id)
+                        .and_then(|info| info.name.clone())
+                        .unwrap_or_else(|| id.to_string()),
+                    ann,
+                )
+            })
             .collect(),
     };
     // Don't log anything if there's no non-stale data.
@@ -187,7 +199,11 @@ fn print_state(args: &Args, state: &State) -> Result<()> {
 }
 
 #[instrument(skip_all)]
-async fn process_event(state: &mut State, event: &BluetoothEvent) -> Result<()> {
+async fn process_event(
+    state: &mut State,
+    session: &BluetoothSession,
+    event: &BluetoothEvent,
+) -> Result<()> {
     match event {
         BluetoothEvent::Adapter { id, event } => match event {
             AdapterEvent::Powered { powered } => {
@@ -218,6 +234,20 @@ async fn process_event(state: &mut State, event: &BluetoothEvent) -> Result<()> 
                                 "🌬️ Aranet4 announcement"
                             );
                             state.aranet4.insert(id.clone(), (Utc::now(), ann));
+
+                            if !state.devices.contains_key(id) {
+                                debug!(dev = format!("{}", id), "Getting device info...");
+                                match session.get_device_info(id).await {
+                                    Ok(info) => {
+                                        state.devices.insert(id.clone(), info);
+                                    }
+                                    Err(err) => warn!(
+                                        dev = format!("{}", id),
+                                        ?err,
+                                        "Couldn't get device info"
+                                    ),
+                                }
+                            }
                         }
                         0x004C => debug!(
                             dev = format!("{}", id),
