@@ -1,8 +1,9 @@
 mod aranet4;
+mod mitherm;
 
 use anyhow::{anyhow, Error, Result};
 use bluez_async::{
-    AdapterEvent, BluetoothEvent, BluetoothSession, DeviceEvent, DeviceId, DeviceInfo,
+    AdapterEvent, BluetoothEvent, BluetoothSession, DeviceEvent, DeviceId, DeviceInfo, uuid_from_u16
 };
 use chrono::{DateTime, Duration, Utc};
 use clap::{Parser, ValueEnum};
@@ -265,12 +266,24 @@ async fn process_event(
             }
             DeviceEvent::ServiceData { service_data } => {
                 for (svc, value) in service_data {
-                    debug!(
-                        dev = format!("{}", id),
-                        svc = format!("{}", svc),
-                        value = hex::encode(value),
-                        "⚙️ Service Data"
-                    );
+					let uuid = uuid_from_u16(0x181A);
+					debug!( svc = format!("{}", svc), uuid = format!("{}", uuid));
+					debug!(
+						dev = format!("{}", id),
+						svc = format!("{}", svc),
+						value = hex::encode(value),
+						"⚙️ Service Data"
+					);					
+					if *svc == uuid {
+						let ann = value.pread::<mitherm::Announcement>(0)?;
+                        debug!(
+                                dev = format!("{}", id),
+                                temp = ann.temperature,
+                                humid = ann.humidity,
+                                bat = ann.battery_mv,
+                                "🌬️ Mitherm announcement"
+                        );
+					}
                 }
             }
             _ => {}
