@@ -9,10 +9,11 @@ pub struct Announcement {
     pub temperature: f64,
     pub humidity: f64,
     pub battery_mv: u16,
-	pub battery_percent: u8,
+    pub battery_percent: u8,
 }
 
-impl<'a> TryFromCtx<'a, ()> for Announcement { // this is the pvvx custom firmware format, apparently
+impl<'a> TryFromCtx<'a, ()> for Announcement {
+    // this is the pvvx custom firmware format, apparently
     type Error = Error;
     fn try_from_ctx(from: &'a [u8], _: ()) -> Result<(Self, usize)> {
         let mut offset = 6;
@@ -24,9 +25,8 @@ impl<'a> TryFromCtx<'a, ()> for Announcement { // this is the pvvx custom firmwa
                 humidity: from
                     .gread_with::<u16>(&mut offset, Endian::Little)
                     .map(|v| v as f64 * 0.01)?,
-                battery_mv: from
-                    .gread_with::<u16>(&mut offset, Endian::Little)?,
-                battery_percent: from.gread(&mut offset)?
+                battery_mv: from.gread_with::<u16>(&mut offset, Endian::Little)?,
+                battery_percent: from.gread(&mut offset)?,
             },
             offset,
         ))
@@ -47,11 +47,11 @@ mod tests {
                 battery_mv: 3004,
             },
             [
-				0x80,0x49,0xd8,0x38,0xc1,0xa4,0xbe,0x08,0x44,0x15,0xbc,0x0b,0x64,0xef,0x04
+                0x80, 0x49, 0xd8, 0x38, 0xc1, 0xa4, 0xbe, 0x08, 0x44, 0x15, 0xbc, 0x0b, 0x64, 0xef,
+                0x04
             ]
             .pread(0)
             .unwrap()
         );
     }
 }
-
